@@ -687,7 +687,10 @@ function generateSyncLink(){
   const payload = exportAllData();
   const jsonStr = JSON.stringify(payload);
   const encoded = utf8ToBase64(jsonStr);
-  const baseUrl = window.location.href.split('#')[0];
+  let baseUrl = window.location.href.split('#')[0];
+  if(window.location.protocol === 'file:'){
+    baseUrl = 'https://trina-k2tp.github.io/cosmetology-test-practice/';
+  }
   return `${baseUrl}#import_sync=${encoded}`;
 }
 
