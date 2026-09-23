@@ -76,9 +76,8 @@ button{font-family:inherit;}
 
 /* ============ APP HEADER (NON-STICKY) ============ */
 .app-header{
-  display:flex; align-items:center; justify-content:space-between; gap:16px;
-  flex-wrap:wrap;
-  padding:16px 0 10px;
+  display:flex; flex-direction:column; gap:10px;
+  padding:14px 0 10px;
 }
 .brand{
   display:flex; align-items:center; gap:12px;
@@ -89,6 +88,10 @@ button{font-family:inherit;}
 }
 .brand-sub{
   font-size:12px; color:var(--ink-soft); letter-spacing:.04em; text-transform:uppercase; display:block; margin-top:2px;
+}
+.header-meta-row{
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  width:100%; flex-wrap:wrap;
 }
 .countdown-chip{
   display:flex; align-items:center; gap:8px;
@@ -114,19 +117,16 @@ button{font-family:inherit;}
   border-bottom:1px solid var(--card-line);
   box-shadow:0 2px 8px rgba(36,34,41,.06);
 }
-.sticky-nav-row{
-  display:flex; align-items:center; justify-content:space-between; gap:8px;
-}
 @media (max-width:768px){
   .app-header{
-    padding:10px 0 4px;
-    gap:6px;
+    padding:10px 0 6px;
+    gap:8px;
   }
   .brand-mark{
     font-size:17px;
   }
-  .sticky-nav-row{
-    gap:6px;
+  .header-meta-row{
+    gap:8px;
   }
   .sticky-nav{
     box-shadow:0 2px 6px rgba(36,34,41,.06);
@@ -135,7 +135,12 @@ button{font-family:inherit;}
 @media (max-width:520px){
   .app-shell{padding:0 12px 80px;}
   .sticky-nav{margin:0 -12px; padding:3px 12px;}
-  .account-name{max-width:90px;}
+  .header-meta-row{gap:8px;}
+  .countdown-chip{padding:4px 10px 4px 6px; font-size:12px; gap:6px;}
+  .countdown-chip .num{width:26px; height:26px; font-size:14px;}
+  .countdown-chip input{width:84px; font-size:11.5px;}
+  .account-name{max-width:120px; font-size:12px;}
+  .tab-btn{padding:6px 12px; font-size:13px;}
 }
 
 /* ============ NAV TABS ============ */
@@ -479,17 +484,17 @@ table.hist td{padding:10px 10px; border-bottom:1px solid var(--card-line);}
         <span class="brand-sub" id="brandSub">424 câu · 10 Session · Đề thi 110 câu (100 tính điểm + 10 thử nghiệm)</span>
       </div>
     </div>
-    <div class="countdown-chip" id="countdown"></div>
-  </header>
-
-  <div class="sticky-nav">
-    <div class="sticky-nav-row">
-      <nav class="tabs" id="tabs"></nav>
+    <div class="header-meta-row">
+      <div class="countdown-chip" id="countdown"></div>
       <div class="backup-actions">
         <span class="account-name" id="accountName" aria-live="polite"></span>
         <button class="btn btn-ghost btn-sm" id="accountBtn">Đăng nhập</button>
       </div>
     </div>
+  </header>
+
+  <div class="sticky-nav">
+    <nav class="tabs" id="tabs"></nav>
   </div>
   <main id="app"></main>
 </div>
@@ -2404,8 +2409,13 @@ function renderPracticeSetup(){
   if(transient.quickPractice){ transient.practiceSetup.count=20; transient.practiceSetup.cats=CAT_ORDER.slice(); transient.quickPractice=false; }
   const ps = transient.practiceSetup;
 
+  const isAllCats = ps.cats.length === CAT_ORDER.length;
   const maxAvail = ps.cats.reduce((s,c)=>s+(Q_BY_CAT[c]||[]).length,0);
   const cfg = getActiveBankConfig();
+
+  const standardCounts = [10, 20, 50, 100];
+  const countChoices = standardCounts.filter(n => n < maxAvail);
+  if(maxAvail > 0 && !countChoices.includes(maxAvail)) countChoices.push(maxAvail);
 
   app.innerHTML = `
     <div class="card">
@@ -2417,14 +2427,26 @@ function renderPracticeSetup(){
         <span class="bank-badge-new" style="background:${activeBankId==='bank_100'?'#B0453A':'var(--ink)'};">${cfg.badge}</span>
       </div>
 
-      <div class="section-label" style="margin-top:16px;">Chọn chủ đề</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;flex-wrap:wrap;gap:8px;">
+        <div class="section-label" style="margin:0;">Chọn chủ đề</div>
+        <button class="btn btn-ghost btn-sm" id="btnToggleAllCats" style="padding:4px 10px !important;font-size:12px !important;">
+          ${isAllCats ? 'Chọn 1 chủ đề' : '✓ Chọn toàn bộ (' + TOTAL_Q + ' câu)'}
+        </button>
+      </div>
       <div class="chip-select" id="catChips">
+        <button class="chip ${isAllCats?'active':''}" data-cat="all">
+          <span class="dot" style="background:var(--ink);"></span>🌟 Toàn bộ chủ đề (${TOTAL_Q})
+        </button>
         ${CAT_ORDER.map(c=>`<button class="chip ${ps.cats.includes(c)?'active':''}" data-cat="${c}"><span class="dot" style="background:${accentHex(c)}"></span>${CATS[c]} (${(Q_BY_CAT[c]||[]).length})</button>`).join('')}
       </div>
       <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;margin-top:18px;">
         <label class="field">Số câu hỏi
           <select id="qCount">
-            ${[10,20,50,TOTAL_Q].filter(n=>n<=Math.max(maxAvail,10)).map(n=>`<option value="${n}" ${ps.count===n?'selected':''}>${n===TOTAL_Q?'Tất cả ('+n+' câu)':n+' câu'}</option>`).join('')}
+            ${countChoices.map(n=>{
+              const isSelected = ps.count === n || (ps.count > maxAvail && n === maxAvail);
+              const label = (n === maxAvail) ? `🌟 Toàn bộ (${n} câu)` : `${n} câu`;
+              return `<option value="${n}" ${isSelected?'selected':''}>${label}</option>`;
+            }).join('')}
           </select>
         </label>
         <label class="toggle-row"><input type="checkbox" id="preferWeak" ${ps.preferWeak?'checked':''}> Ưu tiên câu làm sai & câu chưa học</label>
@@ -2439,14 +2461,32 @@ function renderPracticeSetup(){
   chips.querySelectorAll('.chip').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       const c = btn.dataset.cat;
-      if(ps.cats.includes(c)){
-        if(ps.cats.length>1) ps.cats = ps.cats.filter(x=>x!==c);
+      if(c === 'all'){
+        ps.cats = CAT_ORDER.slice();
       } else {
-        ps.cats.push(c);
+        if(isAllCats && !presetCat){
+          ps.cats = [c];
+        } else if(ps.cats.includes(c)){
+          if(ps.cats.length>1) ps.cats = ps.cats.filter(x=>x!==c);
+        } else {
+          ps.cats.push(c);
+        }
       }
       renderPracticeSetup();
     });
   });
+
+  const toggleAllBtn = document.getElementById('btnToggleAllCats');
+  if(toggleAllBtn){
+    toggleAllBtn.onclick = () => {
+      if(isAllCats){
+        ps.cats = [CAT_ORDER[0]];
+      } else {
+        ps.cats = CAT_ORDER.slice();
+      }
+      renderPracticeSetup();
+    };
+  }
 
   document.getElementById('qCount').onchange = (e)=>{ ps.count = parseInt(e.target.value); };
   document.getElementById('preferWeak').onchange = (e)=>{ ps.preferWeak = e.target.checked; };
