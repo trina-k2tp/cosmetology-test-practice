@@ -1,11 +1,11 @@
 {
-  "name": "California Cosmetology State Board",
-  "short_name": "Cosmetology",
+  "name": "K-CUT — California Cosmetology State Board",
+  "short_name": "K-CUT",
   "description": "Luyện thi trắc nghiệm và ôn lý thuyết Thẩm mỹ California State Board 10 Session",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#0B1528",
-  "theme_color": "#0B1528",
+  "background_color": "#000000",
+  "theme_color": "#000000",
   "icons": [
     {
       "src": "icon-192.png",
