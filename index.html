@@ -579,13 +579,15 @@ const LS_PROGRESS='ph_progress_v1', LS_HISTORY='ph_history_v1', LS_EXAMDATE='ph_
       LS_LASTSTUDY='ph_laststudy_v1', LS_REMINDER='ph_reminder_v1', LS_LASTNOTIFY='ph_lastnotify_v1';
 
 const LS_AUTH_USERNAME='ph_auth_username_v1';
+const LS_AUTH_ACCOUNTS='ph_auth_accounts_v2';
+const LS_AUTH_CURRENT_USER='ph_current_user_v2';
 let activeUser=null;
 let reminderIntervalStarted=false;
 
 function accountKey(key){
   const bankScoped = [LS_PROGRESS, LS_HISTORY, LS_ACTIVE_EXAM, LS_FLASH, LS_LASTSTUDY];
   const b = bankScoped.includes(key) ? `__${activeBankId}` : '';
-  const u = activeUser ? `__${encodeURIComponent(activeUser.key)}` : '';
+  const u = activeUser ? `__${encodeURIComponent(activeUser.key)}` : '__guest';
   return `${key}${b}${u}`;
 }
 
@@ -651,12 +653,15 @@ function exportAllData(){
       }
     }
   }catch(e){}
+  const accs = getAccounts();
+  const currentAcc = (activeUser && accs[activeUser.key]) ? accs[activeUser.key] : null;
   data[LS_AUTH_USERNAME] = activeUser ? activeUser.username : 'Học viên';
   return {
-    version: 2,
+    version: 3,
     appName: 'on-thi-tham-my',
     timestamp: new Date().toISOString(),
     user: activeUser ? activeUser.username : 'Học viên',
+    account: currentAcc,
     cloudSyncId: safeGetItem('cosmo_cloud_sync_id') || '',
     data
   };
@@ -674,8 +679,19 @@ function importAllData(payload){
   if(payload.cloudSyncId){
     safeSetItem('cosmo_cloud_sync_id', payload.cloudSyncId);
   }
-  if(payload.user){
-    activeUser = { username: payload.user, key: payload.user.toLocaleLowerCase('vi-VN') };
+  // Restore account if present
+  if(payload.account && payload.account.username){
+    const accs = getAccounts();
+    const k = payload.account.key || payload.account.username.toLocaleLowerCase('vi-VN');
+    accs[k] = payload.account;
+    saveAccounts(accs);
+    activeUser = { username: payload.account.username, key: k };
+    safeSetItem(LS_AUTH_CURRENT_USER, k);
+    safeSetItem(LS_AUTH_USERNAME, payload.account.username);
+  } else if(payload.user){
+    const k = payload.user.toLocaleLowerCase('vi-VN');
+    activeUser = { username: payload.user, key: k };
+    safeSetItem(LS_AUTH_CURRENT_USER, k);
     safeSetItem(LS_AUTH_USERNAME, payload.user);
   }
   updateAccountUi();
@@ -736,14 +752,15 @@ async function cloudPush(quiet=false){
   let syncId = safeGetItem('cosmo_cloud_sync_id');
   updateCloudBadge('syncing');
   try{
+    const bodyObj = {
+      name: 'cosmo_study_' + (activeUser ? activeUser.key : 'default'),
+      data: payload
+    };
     if(!syncId){
       const res = await fetch('https://api.restful-api.dev/objects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: 'cosmo_study_' + (activeUser ? activeUser.key : 'default'),
-          data: payload
-        })
+        body: JSON.stringify(bodyObj)
       });
       if(res.ok){
         const json = await res.json();
@@ -757,10 +774,7 @@ async function cloudPush(quiet=false){
       const res = await fetch(`https://api.restful-api.dev/objects/${syncId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: 'cosmo_study_' + (activeUser ? activeUser.key : 'default'),
-          data: payload
-        })
+        body: JSON.stringify(bodyObj)
       });
       if(res.ok){
         updateCloudBadge('synced');
@@ -778,7 +792,7 @@ async function cloudPush(quiet=false){
   }
 }
 
-async function cloudPull(specifiedId, quiet=false){
+async function cloudPull(specifiedId, inputPassword=null, quiet=false){
   const syncId = specifiedId || safeGetItem('cosmo_cloud_sync_id');
   if(!syncId){
     if(!quiet) showToast('Vui lòng nhập Mã đồng bộ đám mây.', 'error');
@@ -790,11 +804,28 @@ async function cloudPull(specifiedId, quiet=false){
     if(res.ok){
       const json = await res.json();
       if(json && json.data && json.data.data){
+        // Password protection check
+        const targetAcc = json.data.account;
+        if(targetAcc && targetAcc.passwordHash){
+          const pHash = inputPassword ? await hashPassword(inputPassword) : null;
+          const currentAcc = (activeUser && getAccounts()[activeUser.key]) ? getAccounts()[activeUser.key] : null;
+          const isSameUser = currentAcc && currentAcc.passwordHash === targetAcc.passwordHash && currentAcc.key === (targetAcc.key || targetAcc.username.toLowerCase());
+          
+          if(!isSameUser && (!pHash || pHash !== targetAcc.passwordHash)){
+            updateCloudBadge('offline');
+            return {
+              success: false,
+              needPassword: true,
+              targetUser: targetAcc.username,
+              error: `Tài khoản "${targetAcc.username}" được bảo vệ bằng mật khẩu. Vui lòng nhập đúng mật khẩu để tải về.`
+            };
+          }
+        }
         const count = importAllData(json.data);
         safeSetItem('cosmo_cloud_sync_id', syncId);
         updateCloudBadge('synced');
-        if(!quiet) showToast(`Đã tải về thành công ${count} mục tiến độ học tập!`, 'success');
-        return { success: true, id: syncId };
+        if(!quiet) showToast(`Đã tải về thành công ${count} mục tiến độ học tập cho "${json.data.user || 'Học viên'}"!`, 'success');
+        return { success: true, id: syncId, user: json.data.user };
       }
     }
     updateCloudBadge('offline');
@@ -849,16 +880,353 @@ function saveReminder(r){ lsSet(LS_REMINDER, r); }
 
 const BACKUP_KEYS = [LS_PROGRESS, LS_HISTORY, LS_EXAMDATE, LS_ACTIVE_EXAM, LS_FLASH, LS_LASTSTUDY, LS_REMINDER];
 
+/* ============================================================
+   ACCOUNT & PASSWORD SECURITY ENGINE
+   ============================================================ */
+async function hashPassword(pwd, salt='cosmo_stateboard_salt_2026'){
+  const str = `${salt}:${(pwd||'').trim()}`;
+  if(window.crypto && window.crypto.subtle){
+    try{
+      const buf = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+    }catch(e){}
+  }
+  let h1 = 0xdeadbeef, h2 = 0x41c64e6d;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 'h_' + (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+}
+
+function getAccounts(){
+  try{
+    const raw = safeGetItem(LS_AUTH_ACCOUNTS);
+    return raw ? JSON.parse(raw) : {};
+  }catch(e){ return {}; }
+}
+
+function saveAccounts(accs){
+  try{
+    safeSetItem(LS_AUTH_ACCOUNTS, JSON.stringify(accs));
+  }catch(e){}
+}
+
+function isGuestUser(){
+  return !activeUser || !activeUser.key || activeUser.key === 'default' || activeUser.key === '__guest';
+}
+
 function updateAccountUi(){
-  const name = document.getElementById('accountName');
-  const button = document.getElementById('accountBtn');
-  if(!name || !button) return;
+  const nameEl = document.getElementById('accountName');
+  const btnEl = document.getElementById('accountBtn');
+  if(!nameEl || !btnEl) return;
   const syncId = safeGetItem('cosmo_cloud_sync_id');
-  name.innerHTML = `👤 ${activeUser ? escapeHtml(activeUser.username) : 'Học viên'} <span id="syncBadge" class="sync-badge ${syncId?'synced':'offline'}" title="${syncId?'Đã kết nối đám mây':'Chưa kết nối đám mây'}"></span>`;
-  button.textContent = 'Tài khoản & Đồng bộ';
+  const accs = getAccounts();
+  const currentAcc = (activeUser && accs[activeUser.key]) ? accs[activeUser.key] : null;
+  const hasPwd = currentAcc && !!currentAcc.passwordHash;
+
+  if(isGuestUser()){
+    nameEl.innerHTML = `<span style="opacity:0.8;">👤 Học viên khách</span>`;
+    btnEl.innerHTML = `🔑 Đăng nhập / Đăng ký`;
+    btnEl.className = 'btn btn-primary btn-sm';
+  } else {
+    nameEl.innerHTML = `👤 <strong>${escapeHtml(activeUser.username)}</strong>${hasPwd?'<span title="Đã cài mật khẩu bảo vệ" style="font-size:11px;margin-left:4px;">🔒</span>':''} <span id="syncBadge" class="sync-badge ${syncId?'synced':'offline'}" title="${syncId?'Đã kết nối đám mây':'Chưa kết nối đám mây'}"></span>`;
+    btnEl.innerHTML = `⚙️ Tài khoản & Đồng bộ`;
+    btnEl.className = 'btn btn-ghost btn-sm';
+  }
+}
+
+async function loginAccount(username, password){
+  const uname = (username||'').trim();
+  const pwd = (password||'').trim();
+  if(!uname) return { success: false, error: 'Vui lòng nhập Tên đăng nhập.' };
+  if(!pwd) return { success: false, error: 'Vui lòng nhập Mật khẩu / Mã PIN.' };
+
+  const key = uname.toLocaleLowerCase('vi-VN');
+  const accs = getAccounts();
+  const acc = accs[key];
+  if(!acc){
+    return { success: false, error: `Tài khoản "${uname}" chưa tồn tại trên máy này. Bấm tab Đăng ký để tạo mới!` };
+  }
+
+  const pHash = await hashPassword(pwd);
+  if(acc.passwordHash && acc.passwordHash !== pHash){
+    return { success: false, error: 'Mật khẩu không chính xác! Vui lòng thử lại.' };
+  }
+
+  acc.lastLogin = new Date().toISOString();
+  accs[key] = acc;
+  saveAccounts(accs);
+
+  activeUser = { username: acc.username, key, hasPassword: !!acc.passwordHash };
+  safeSetItem(LS_AUTH_CURRENT_USER, key);
+  safeSetItem(LS_AUTH_USERNAME, acc.username);
+
+  updateAccountUi();
+  route();
+  showToast(`Chào mừng ${acc.username} đã đăng nhập!`, 'success');
+  return { success: true, user: activeUser };
+}
+
+async function registerAccount(username, password, confirmPassword){
+  const uname = (username||'').trim().replace(/\s+/g,' ');
+  const pwd = (password||'').trim();
+  if(!uname || uname.length < 2){
+    return { success: false, error: 'Tên đăng nhập cần có ít nhất 2 ký tự.' };
+  }
+  if(uname.length > 30){
+    return { success: false, error: 'Tên đăng nhập tối đa 30 ký tự.' };
+  }
+  if(!pwd || pwd.length < 3){
+    return { success: false, error: 'Mật khẩu cần tối thiểu 3 ký tự (chữ hoặc số PIN).' };
+  }
+  if(confirmPassword !== undefined && pwd !== confirmPassword.trim()){
+    return { success: false, error: 'Mật khẩu xác nhận không khớp.' };
+  }
+
+  const key = uname.toLocaleLowerCase('vi-VN');
+  const accs = getAccounts();
+  if(accs[key]){
+    return { success: false, error: `Tên đăng nhập "${uname}" đã có người sử dụng. Nếu đây là bạn, hãy bấm Đăng nhập. Nếu không, vui lòng chọn tên khác (ví dụ: ${uname}2, ${uname}_nails).` };
+  }
+
+  const pHash = await hashPassword(pwd);
+  const newAcc = {
+    username: uname,
+    key,
+    passwordHash: pHash,
+    createdAt: new Date().toISOString(),
+    lastLogin: new Date().toISOString()
+  };
+  accs[key] = newAcc;
+  saveAccounts(accs);
+
+  // Migrate legacy guest data if this is the first registered account
+  if(Object.keys(accs).length === 1){
+    try{
+      const bankScoped = [LS_PROGRESS, LS_HISTORY, LS_ACTIVE_EXAM, LS_FLASH, LS_LASTSTUDY];
+      ['bank_424', 'bank_100'].forEach(bId => {
+        bankScoped.forEach(k => {
+          const oldVal = safeGetItem(`${k}__${bId}`) || safeGetItem(`${k}__${bId}__default`) || safeGetItem(`${k}__${bId}____guest`);
+          if(oldVal && !safeGetItem(`${k}__${bId}__${key}`)){
+            safeSetItem(`${k}__${bId}__${key}`, oldVal);
+          }
+        });
+      });
+    }catch(e){}
+  }
+
+  activeUser = { username: uname, key, hasPassword: true };
+  safeSetItem(LS_AUTH_CURRENT_USER, key);
+  safeSetItem(LS_AUTH_USERNAME, uname);
+
+  updateAccountUi();
+  route();
+  showToast(`Đã tạo tài khoản "${uname}" thành công!`, 'success');
+  return { success: true, user: activeUser };
+}
+
+async function changePassword(oldPwd, newPwd, confirmPwd){
+  if(isGuestUser()) return { success: false, error: 'Vui lòng đăng nhập trước khi đổi mật khẩu.' };
+  const accs = getAccounts();
+  const acc = accs[activeUser.key];
+  if(!acc) return { success: false, error: 'Không tìm thấy tài khoản.' };
+
+  const oldHash = await hashPassword((oldPwd||'').trim());
+  if(acc.passwordHash && acc.passwordHash !== oldHash){
+    return { success: false, error: 'Mật khẩu hiện tại không chính xác.' };
+  }
+  if(!newPwd || newPwd.trim().length < 3){
+    return { success: false, error: 'Mật khẩu mới tối thiểu 3 ký tự.' };
+  }
+  if(newPwd.trim() !== confirmPwd.trim()){
+    return { success: false, error: 'Mật khẩu xác nhận không khớp.' };
+  }
+
+  acc.passwordHash = await hashPassword(newPwd.trim());
+  accs[activeUser.key] = acc;
+  saveAccounts(accs);
+  showToast('Đã đổi mật khẩu thành công!', 'success');
+  return { success: true };
+}
+
+function logoutAccount(){
+  safeRemoveItem(LS_AUTH_CURRENT_USER);
+  activeUser = null;
+  updateAccountUi();
+  route();
+  showToast('Đã đăng xuất. Bạn có thể chọn tài khoản khác để vào học.', 'info');
+  showLoginModal('login');
+}
+
+function showLoginModal(initialTab='login', prefillUser='', onDone=null){
+  const existing = document.getElementById('loginOverlay');
+  if(existing) existing.remove();
+
+  const accs = getAccounts();
+  const accList = Object.values(accs);
+
+  let currentTab = initialTab;
+  if(accList.length === 0 && initialTab !== 'register'){
+    currentTab = 'register';
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'loginOverlay';
+
+  function renderModalContent(){
+    overlay.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" style="max-width:480px;padding:24px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;">
+          <div>
+            <div class="section-label" style="margin:0;">HỒ SƠ HỌC VIÊN STATE BOARD</div>
+            <h3 style="margin:4px 0 0;font-size:20px;">${currentTab==='login'?'Đăng nhập':'Đăng ký tài khoản mới'}</h3>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="closeLoginCross" style="font-size:18px;line-height:1;padding:4px 8px;">✕</button>
+        </div>
+
+        <p style="font-size:13px;color:var(--ink-soft);margin-bottom:16px;line-height:1.45;">
+          ${currentTab==='login'
+            ? 'Đăng nhập bằng Tên và Mật khẩu của bạn để tải đúng bài thi và bảo mật tiến độ học.'
+            : 'Tạo tên đăng nhập và mật khẩu riêng (mỗi học viên một tên riêng biệt, không bị trùng lẫn bài làm).'}
+        </p>
+
+        <div style="display:flex;gap:6px;background:rgba(36,34,41,.06);padding:4px;border-radius:10px;margin-bottom:16px;">
+          <button id="modalTabLogin" class="btn btn-sm ${currentTab==='login'?'btn-primary':'btn-ghost'}" style="flex:1;justify-content:center;border-radius:8px;">🔑 Đăng nhập</button>
+          <button id="modalTabRegister" class="btn btn-sm ${currentTab==='register'?'btn-primary':'btn-ghost'}" style="flex:1;justify-content:center;border-radius:8px;">📝 Đăng ký mới</button>
+        </div>
+
+        ${accList.length > 0 && currentTab==='login' ? `
+          <div style="background:var(--paper-warm);border:1px solid var(--card-line);border-radius:10px;padding:10px 12px;margin-bottom:14px;">
+            <div style="font-size:11.5px;color:var(--ink-soft);font-weight:600;margin-bottom:6px;">CHỌN NHANH TÀI KHOẢN TRÊN MÁY NÀY:</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              ${accList.map(a => `<button class="chip btn-sm q-acc-chip" data-user="${escapeHtml(a.username)}" style="padding:4px 10px;font-size:12px;cursor:pointer;">👤 ${escapeHtml(a.username)}</button>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        <form id="loginForm" onsubmit="return false;" style="display:flex;flex-direction:column;gap:12px;">
+          <div>
+            <label style="font-size:12.5px;font-weight:600;display:block;margin-bottom:4px;color:var(--ink);">Tên đăng nhập (Username)</label>
+            <input id="loginUnameInput" type="text" maxlength="30" value="${escapeHtml(prefillUser)}" placeholder="Ví dụ: trina, trinh2026, hoang_nail..." style="width:100%;padding:9px 12px;border:1px solid var(--card-line);border-radius:8px;font-size:14px;" autocomplete="username" required>
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:3px;">Viết liền hoặc gạch dưới. Mỗi học viên cần 1 tên đăng nhập riêng biệt.</div>
+          </div>
+
+          <div>
+            <label style="font-size:12.5px;font-weight:600;display:block;margin-bottom:4px;color:var(--ink);">Mật khẩu / Mã PIN</label>
+            <div style="position:relative;display:flex;align-items:center;">
+              <input id="loginPwdInput" type="password" maxlength="40" placeholder="Nhập mật khẩu hoặc mã PIN (tối thiểu 3 ký tự)" style="width:100%;padding:9px 38px 9px 12px;border:1px solid var(--card-line);border-radius:8px;font-size:14px;" autocomplete="${currentTab==='login'?'current-password':'new-password'}" required>
+              <button type="button" id="loginTogglePwdBtn" style="position:absolute;right:8px;background:none;border:none;cursor:pointer;font-size:15px;padding:4px;" title="Hiện/Ẩn mật khẩu">👁️</button>
+            </div>
+          </div>
+
+          ${currentTab==='register' ? `
+            <div>
+              <label style="font-size:12.5px;font-weight:600;display:block;margin-bottom:4px;color:var(--ink);">Xác nhận mật khẩu</label>
+              <input id="loginConfirmPwdInput" type="password" maxlength="40" placeholder="Nhập lại mật khẩu vừa đặt" style="width:100%;padding:9px 12px;border:1px solid var(--card-line);border-radius:8px;font-size:14px;" autocomplete="new-password" required>
+            </div>
+          ` : ''}
+
+          <div id="loginFeedbackMsg" style="font-size:12.5px;font-weight:600;min-height:18px;"></div>
+
+          <div style="display:flex;gap:8px;margin-top:4px;">
+            <button type="button" class="btn btn-ghost" id="loginCancelBtn" style="flex:1;justify-content:center;">Để sau</button>
+            <button type="submit" class="btn btn-primary" id="loginSubmitBtn" style="flex:1.5;justify-content:center;">
+              ${currentTab==='login'?'Vào học ngay ➔':'Tạo tài khoản & Vào học ➔'}
+            </button>
+          </div>
+        </form>
+      </div>
+    `;
+
+    // Bindings
+    const close = ()=> overlay.remove();
+    overlay.querySelector('#closeLoginCross').onclick = close;
+    overlay.querySelector('#loginCancelBtn').onclick = close;
+    overlay.onclick = (e)=>{ if(e.target===overlay) close(); };
+
+    overlay.querySelector('#modalTabLogin').onclick = ()=>{
+      currentTab = 'login';
+      renderModalContent();
+    };
+    overlay.querySelector('#modalTabRegister').onclick = ()=>{
+      currentTab = 'register';
+      renderModalContent();
+    };
+
+    const pwdInput = overlay.querySelector('#loginPwdInput');
+    overlay.querySelector('#loginTogglePwdBtn').onclick = ()=>{
+      pwdInput.type = pwdInput.type==='password' ? 'text' : 'password';
+    };
+
+    overlay.querySelectorAll('.q-acc-chip').forEach(btn => {
+      btn.onclick = ()=>{
+        overlay.querySelector('#loginUnameInput').value = btn.dataset.user;
+        pwdInput.focus();
+      };
+    });
+
+    overlay.querySelector('#loginForm').onsubmit = async ()=>{
+      const uname = overlay.querySelector('#loginUnameInput').value;
+      const pwd = overlay.querySelector('#loginPwdInput').value;
+      const msgEl = overlay.querySelector('#loginFeedbackMsg');
+      const submitBtn = overlay.querySelector('#loginSubmitBtn');
+      msgEl.style.color = '#DC2626';
+      msgEl.textContent = '';
+      submitBtn.disabled = true;
+
+      try{
+        if(currentTab === 'login'){
+          const res = await loginAccount(uname, pwd);
+          if(res.success){
+            msgEl.style.color = '#16A34A';
+            msgEl.textContent = '✓ Đăng nhập thành công!';
+            setTimeout(()=>{
+              close();
+              if(onDone) onDone(res.user);
+            }, 400);
+          } else {
+            msgEl.textContent = res.error;
+          }
+        } else {
+          const confirmPwd = overlay.querySelector('#loginConfirmPwdInput').value;
+          const res = await registerAccount(uname, pwd, confirmPwd);
+          if(res.success){
+            msgEl.style.color = '#16A34A';
+            msgEl.textContent = '✓ Đã tạo tài khoản thành công!';
+            setTimeout(()=>{
+              close();
+              if(onDone) onDone(res.user);
+            }, 400);
+          } else {
+            msgEl.textContent = res.error;
+          }
+        }
+      }catch(err){
+        msgEl.textContent = 'Lỗi xử lý: ' + err.message;
+      }finally{
+        submitBtn.disabled = false;
+      }
+    };
+  }
+
+  renderModalContent();
+  document.body.appendChild(overlay);
+  setTimeout(()=>{
+    const input = overlay.querySelector('#loginUnameInput');
+    if(input) input.focus();
+  }, 100);
 }
 
 function showAuthModal(){
+  if(isGuestUser()){
+    showLoginModal('login');
+    return;
+  }
   if(document.getElementById('authOverlay')) return;
   const syncId = safeGetItem('cosmo_cloud_sync_id') || '';
   const overlay = document.createElement('div');
@@ -868,35 +1236,52 @@ function showAuthModal(){
     <div class="modal" role="dialog" aria-modal="true" style="max-width:540px;">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
         <div>
-          <div class="section-label" style="margin:0;">ĐỒNG BỘ TIẾN ĐỘ HỌC TẬP</div>
-          <h3 style="margin:4px 0 0;font-size:20px;">Tài khoản & Đồng bộ Đa trình duyệt</h3>
+          <div class="section-label" style="margin:0;">HỒ SƠ HỌC VIÊN & ĐỒNG BỘ</div>
+          <h3 style="margin:4px 0 0;font-size:20px;">Quản lý Tài khoản & Thiết bị</h3>
         </div>
         <button class="btn btn-ghost btn-sm" id="closeModalCross" style="font-size:18px;line-height:1;padding:4px 8px;">✕</button>
       </div>
 
-      <p style="font-size:13px;color:var(--ink-soft);margin-bottom:16px;line-height:1.45;">
-        Dù bạn mở bằng <strong>Safari, Chrome, máy tính khác hay điện thoại</strong>, hãy dùng các cách dưới đây để tiến độ học luôn được bảo lưu 100%.
-      </p>
-
-      <!-- 1. TÊN NGƯỜI HỌC -->
+      <!-- 1. HỒ SƠ TÀI KHOẢN -->
       <div style="background:var(--paper-warm);border:1px solid var(--card-line);border-radius:10px;padding:14px;margin-bottom:14px;">
-        <div style="font-weight:600;font-size:13.5px;margin-bottom:6px;display:flex;align-items:center;gap:6px;">
-          <span>👤 Tên người học</span>
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+          <div>
+            <div style="font-size:11.5px;color:var(--ink-soft);font-weight:600;">TÀI KHOẢN ĐANG HOẠT ĐỘNG</div>
+            <div style="font-size:18px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:6px;margin-top:2px;">
+              <span>👤 ${escapeHtml(activeUser.username)}</span>
+              <span style="font-size:11px;background:#DCFCE7;color:#15803D;padding:2px 8px;border-radius:999px;font-weight:600;">🔒 Đã bảo vệ</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="btn btn-ghost btn-sm" id="authSwitchAccountBtn">🚪 Đổi tài khoản</button>
+            <button class="btn btn-ghost btn-sm" id="authToggleChangePwdBtn">🔑 Đổi MK</button>
+            <button class="btn btn-ghost btn-sm" id="authNewAccountBtn">➕ Thêm người</button>
+          </div>
         </div>
-        <div style="display:flex;gap:8px;">
-          <input id="syncUsername" type="text" maxlength="40" value="${escapeHtml(activeUser ? activeUser.username : 'Học viên')}" placeholder="Nhập tên của bạn" style="flex:1;padding:8px 12px;border:1px solid var(--card-line);border-radius:8px;font-size:14px;">
-          <button class="btn btn-primary btn-sm" id="saveUsernameBtn">Lưu tên</button>
+
+        <!-- Collapsible Change Password -->
+        <div id="authChangePwdBox" style="display:none;margin-top:12px;padding-top:12px;border-top:1px dashed var(--card-line);">
+          <div style="font-weight:600;font-size:12.5px;margin-bottom:8px;">Thay đổi Mật khẩu / Mã PIN:</div>
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <input id="pwdOldInput" type="password" placeholder="Mật khẩu hiện tại" style="padding:7px 10px;border:1px solid var(--card-line);border-radius:6px;font-size:13px;">
+            <input id="pwdNewInput" type="password" placeholder="Mật khẩu mới (tối thiểu 3 ký tự)" style="padding:7px 10px;border:1px solid var(--card-line);border-radius:6px;font-size:13px;">
+            <input id="pwdConfirmInput" type="password" placeholder="Nhập lại mật khẩu mới" style="padding:7px 10px;border:1px solid var(--card-line);border-radius:6px;font-size:13px;">
+            <div style="display:flex;justify-content:flex-end;gap:6px;">
+              <button class="btn btn-sm btn-ghost" id="pwdCancelBtn">Hủy</button>
+              <button class="btn btn-sm btn-primary" id="pwdSaveBtn">Lưu mật khẩu mới</button>
+            </div>
+            <div id="pwdChangeMsg" style="font-size:12px;font-weight:500;"></div>
+          </div>
         </div>
-        <div id="usernameMsg" style="font-size:12px;margin-top:4px;color:#16A34A;font-weight:500;"></div>
       </div>
 
       <!-- 2. CÁCH 1: LINK 1-CHẠM TIẾP TỤC HỌC (NHANH NHẤT) -->
       <div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:10px;padding:14px;margin-bottom:14px;">
         <div style="font-weight:700;font-size:13.5px;color:#166534;margin-bottom:4px;display:flex;align-items:center;gap:6px;">
-          <span>⚡ Cách 1: Chuyển sang trình duyệt khác tức thì (Khuyên dùng)</span>
+          <span>⚡ Cách 1: Chuyển sang Điện thoại / Trình duyệt khác (Khuyên dùng)</span>
         </div>
         <p style="font-size:12.5px;color:#15803D;margin:0 0 10px;line-height:1.4;">
-          Sao chép liên kết chứa toàn bộ bài đã học, sau đó dán vào Chrome, Edge hoặc mở trên điện thoại để tiếp tục học ngay:
+          Sao chép liên kết chứa tài khoản <strong>${escapeHtml(activeUser.username)}</strong> và toàn bộ bài đã học. Mở trên điện thoại là tự động đăng nhập và tiếp tục học ngay:
         </p>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn btn-primary btn-sm" id="copySyncLinkBtn" style="background:#16A34A;border-color:#16A34A;">🔗 Sao chép link chuyển trình duyệt</button>
@@ -920,10 +1305,11 @@ function showAuthModal(){
           <span id="cloudTag" class="pill" style="font-size:11px;background:#DBEAFE;color:#1E40AF;">${syncId?'🟢 Đã kết nối':'⚪ Chưa kết nối'}</span>
         </div>
         <p style="font-size:12.5px;color:#1D4ED8;margin:0 0 10px;line-height:1.4;">
-          Lưu dữ liệu lên máy chủ an toàn. Chỉ cần giữ nguyên Mã đồng bộ này trên các trình duyệt để tự động đồng bộ 2 chiều:
+          Lưu dữ liệu bảo mật lên máy chủ. Trên điện thoại chỉ cần nhập Mã đồng bộ kèm Mật khẩu tài khoản để tải bài về:
         </p>
-        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
-          <input id="cloudIdInput" type="text" value="${escapeHtml(syncId)}" placeholder="Mã đồng bộ đám mây (Cloud ID)" style="flex:1;padding:8px 12px;border:1px solid #93C5FD;border-radius:8px;font-size:12.5px;font-family:monospace;">
+        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap;">
+          <input id="cloudIdInput" type="text" value="${escapeHtml(syncId)}" placeholder="Mã đồng bộ đám mây (Cloud ID)" style="flex:1.2;min-width:160px;padding:8px 12px;border:1px solid #93C5FD;border-radius:8px;font-size:12.5px;font-family:monospace;">
+          <input id="cloudPwdInput" type="password" placeholder="Mật khẩu tài khoản" style="flex:1;min-width:130px;padding:8px 12px;border:1px solid #93C5FD;border-radius:8px;font-size:12.5px;">
           <button class="btn btn-sm btn-primary" id="cloudPullModalBtn" style="background:#2563EB;border-color:#2563EB;">⬇️ Tải về</button>
           <button class="btn btn-sm btn-ghost" id="cloudPushModalBtn" style="background:#fff;border-color:#93C5FD;">⬆️ Đẩy lên</button>
         </div>
@@ -955,14 +1341,36 @@ function showAuthModal(){
   overlay.querySelector('#closeSyncModalBtn').onclick = close;
   overlay.onclick = (e)=>{ if(e.target===overlay) close(); };
 
-  // Save username
-  overlay.querySelector('#saveUsernameBtn').onclick = ()=>{
-    const uname = (overlay.querySelector('#syncUsername').value||'').trim().replace(/\s+/g,' ') || 'Học viên';
-    activeUser = { username: uname, key: uname.toLocaleLowerCase('vi-VN') };
-    safeSetItem(LS_AUTH_USERNAME, uname);
-    updateAccountUi();
-    overlay.querySelector('#usernameMsg').textContent = `✓ Đã lưu tên "${uname}".`;
-    setTimeout(()=>{ if(overlay.querySelector('#usernameMsg')) overlay.querySelector('#usernameMsg').textContent=''; }, 3000);
+  // Account buttons
+  overlay.querySelector('#authSwitchAccountBtn').onclick = ()=>{
+    close();
+    logoutAccount();
+  };
+  overlay.querySelector('#authNewAccountBtn').onclick = ()=>{
+    close();
+    showLoginModal('register');
+  };
+  overlay.querySelector('#authToggleChangePwdBtn').onclick = ()=>{
+    const box = overlay.querySelector('#authChangePwdBox');
+    box.style.display = box.style.display==='none' ? 'block' : 'none';
+  };
+  overlay.querySelector('#pwdCancelBtn').onclick = ()=>{
+    overlay.querySelector('#authChangePwdBox').style.display = 'none';
+  };
+  overlay.querySelector('#pwdSaveBtn').onclick = async ()=>{
+    const oldP = overlay.querySelector('#pwdOldInput').value;
+    const newP = overlay.querySelector('#pwdNewInput').value;
+    const confP = overlay.querySelector('#pwdConfirmInput').value;
+    const msgEl = overlay.querySelector('#pwdChangeMsg');
+    msgEl.style.color = '#DC2626';
+    const res = await changePassword(oldP, newP, confP);
+    if(res.success){
+      msgEl.style.color = '#16A34A';
+      msgEl.textContent = '✓ Đã đổi mật khẩu thành công!';
+      setTimeout(()=>{ overlay.querySelector('#authChangePwdBox').style.display = 'none'; }, 1500);
+    } else {
+      msgEl.textContent = res.error;
+    }
   };
 
   // Copy sync link
@@ -1009,7 +1417,6 @@ function showAuthModal(){
     try{
       const payload = JSON.parse(base64ToUtf8(code));
       const count = importAllData(payload);
-      overlay.querySelector('#syncUsername').value = activeUser.username;
       overlay.querySelector('#quickSyncMsg').textContent = `✓ Đã áp dụng thành công ${count} mục dữ liệu cho "${activeUser.username}"!`;
       overlay.querySelector('#pasteCodeBox').style.display = 'none';
     }catch(err){
@@ -1034,17 +1441,18 @@ function showAuthModal(){
   // Cloud pull
   overlay.querySelector('#cloudPullModalBtn').onclick = async ()=>{
     const inputId = (overlay.querySelector('#cloudIdInput').value||'').trim();
+    const inputPwd = (overlay.querySelector('#cloudPwdInput').value||'').trim();
     const msgEl = overlay.querySelector('#cloudModalMsg');
     if(!inputId){
       msgEl.textContent = '⚠️ Vui lòng nhập Mã đồng bộ đám mây.';
       return;
     }
     msgEl.textContent = 'Đang tải dữ liệu từ máy chủ...';
-    const res = await cloudPull(inputId, false);
+    const res = await cloudPull(inputId, inputPwd, false);
     if(res.success){
       overlay.querySelector('#cloudTag').textContent = '🟢 Đã kết nối';
-      overlay.querySelector('#syncUsername').value = activeUser.username;
       msgEl.textContent = `✓ Đã tải về và cập nhật toàn bộ bài học thành công!`;
+      setTimeout(()=>{ close(); }, 1200);
     } else {
       msgEl.textContent = '⚠️ ' + res.error;
     }
@@ -1061,19 +1469,32 @@ function showAuthModal(){
 }
 
 async function ensureSignedIn(){
-  let username = '';
-  try{ username = (safeGetItem(LS_AUTH_USERNAME)||'').trim(); }catch(e){}
-  if(!username){
-    username = 'Học viên';
-    try{ safeSetItem(LS_AUTH_USERNAME, username); }catch(e){}
+  const accs = getAccounts();
+  const currentKey = safeGetItem(LS_AUTH_CURRENT_USER);
+  if(currentKey && accs[currentKey]){
+    const acc = accs[currentKey];
+    activeUser = { username: acc.username, key: currentKey, hasPassword: !!acc.passwordHash };
+  } else {
+    const keys = Object.keys(accs);
+    if(keys.length > 0){
+      const acc = accs[keys[0]];
+      activeUser = { username: acc.username, key: keys[0], hasPassword: !!acc.passwordHash };
+      safeSetItem(LS_AUTH_CURRENT_USER, keys[0]);
+    } else {
+      let legacyName = (safeGetItem(LS_AUTH_USERNAME)||'').trim();
+      if(legacyName && legacyName !== 'Học viên'){
+        activeUser = { username: legacyName, key: legacyName.toLocaleLowerCase('vi-VN'), hasPassword: false };
+      } else {
+        activeUser = null;
+      }
+    }
   }
-  activeUser = { username, key: username.toLocaleLowerCase('vi-VN') };
   updateAccountUi();
   return true;
 }
 
 function signOut(){
-  showAuthModal();
+  logoutAccount();
 }
 
 function todayStr(){ return new Date().toISOString().slice(0,10); }
@@ -2609,7 +3030,24 @@ async function initializeApp(){
   if(!reminderIntervalStarted){ setInterval(checkReminderTick, 30000); reminderIntervalStarted=true; }
 
   const accBtn = document.getElementById('accountBtn');
-  if(accBtn) accBtn.onclick = ()=> showAuthModal();
+  if(accBtn) accBtn.onclick = ()=> {
+    if(isGuestUser()){
+      showLoginModal('login');
+    } else {
+      showAuthModal();
+    }
+  };
+  const accName = document.getElementById('accountName');
+  if(accName){
+    accName.style.cursor = 'pointer';
+    accName.onclick = ()=> {
+      if(isGuestUser()){
+        showLoginModal('login');
+      } else {
+        showAuthModal();
+      }
+    };
+  }
 }
 
 (async ()=>{
