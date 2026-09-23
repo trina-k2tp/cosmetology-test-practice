@@ -1149,6 +1149,19 @@ function showLoginModal(initialTab='login', prefillUser='', onDone=null){
               ${currentTab==='login'?'Vào học ngay ➔':'Tạo tài khoản & Vào học ➔'}
             </button>
           </div>
+          <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--card-line);text-align:center;">
+            <div style="font-size:12px;color:var(--ink-soft);margin-bottom:6px;">Đã học trên máy tính hoặc điện thoại khác?</div>
+            <button type="button" class="btn btn-sm btn-ghost" id="openDirectSyncBtn" style="font-size:12px;background:#F0FDF4;border:1px solid #86EFAC;color:#166534;width:100%;justify-content:center;">
+              📲 Nạp tài khoản từ máy tính sang máy này (Dán link / Mã)
+            </button>
+            <div id="directSyncBox" style="display:none;margin-top:10px;text-align:left;">
+              <textarea id="directSyncInput" placeholder="Dán link đồng bộ hoặc mã dữ liệu bạn sao chép từ máy tính vào đây..." style="width:100%;height:65px;padding:8px;font-size:11.5px;border:1px solid #86EFAC;border-radius:6px;font-family:monospace;"></textarea>
+              <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:6px;">
+                <button type="button" class="btn btn-sm btn-ghost" id="cancelDirectSyncBtn">Đóng</button>
+                <button type="button" class="btn btn-sm btn-primary" id="applyDirectSyncBtn" style="background:#16A34A;border-color:#16A34A;">Nạp & Vào học</button>
+              </div>
+            </div>
+          </div>
         </form>
       </div>
     `;
@@ -1158,6 +1171,45 @@ function showLoginModal(initialTab='login', prefillUser='', onDone=null){
     overlay.querySelector('#closeLoginCross').onclick = close;
     overlay.querySelector('#loginCancelBtn').onclick = close;
     overlay.onclick = (e)=>{ if(e.target===overlay) close(); };
+
+    const syncBox = overlay.querySelector('#directSyncBox');
+    const openSyncBtn = overlay.querySelector('#openDirectSyncBtn');
+    if(openSyncBtn){
+      openSyncBtn.onclick = ()=>{
+        syncBox.style.display = syncBox.style.display==='none' ? 'block' : 'none';
+      };
+    }
+    const cancelSyncBtn = overlay.querySelector('#cancelDirectSyncBtn');
+    if(cancelSyncBtn){
+      cancelSyncBtn.onclick = ()=>{ syncBox.style.display = 'none'; };
+    }
+    const applySyncBtn = overlay.querySelector('#applyDirectSyncBtn');
+    if(applySyncBtn){
+      applySyncBtn.onclick = async ()=>{
+        let raw = (overlay.querySelector('#directSyncInput').value||'').trim();
+        if(!raw){ alert('Vui lòng dán link hoặc mã đồng bộ.'); return; }
+        if(raw.includes('import_sync=')){
+          raw = raw.split('import_sync=')[1].split('&')[0];
+        }
+        try{
+          const payload = JSON.parse(base64ToUtf8(raw));
+          const count = importAllData(payload);
+          showToast(`✓ Đã nạp thành công tài khoản "${payload.user}" cùng toàn bộ bài học!`, 'success');
+          close();
+          if(onDone) onDone(activeUser);
+        }catch(e){
+          if(!raw.includes('{') && raw.length > 5){
+            const res = await cloudPull(raw, null, false);
+            if(res.success){
+              close();
+              if(onDone) onDone(activeUser);
+              return;
+            }
+          }
+          alert('Dữ liệu không hợp lệ: ' + e.message);
+        }
+      };
+    }
 
     overlay.querySelector('#modalTabLogin').onclick = ()=>{
       currentTab = 'login';
