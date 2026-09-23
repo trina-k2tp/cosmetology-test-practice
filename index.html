@@ -1435,17 +1435,21 @@ function showAuthModal(){
   };
 
   // Copy sync link
-  overlay.querySelector('#copySyncLinkBtn').onclick = ()=>{
-    const link = generateSyncLink();
+  overlay.querySelector('#copySyncLinkBtn').onclick = async ()=>{
     const msgEl = overlay.querySelector('#quickSyncMsg');
+    msgEl.textContent = 'Đang chuẩn bị link kết nối tự động...';
+    if(!safeGetItem('cosmo_cloud_sync_id')){
+      await cloudPush(true);
+    }
+    const link = generateSyncLink();
     if(navigator.clipboard && navigator.clipboard.writeText){
       navigator.clipboard.writeText(link).then(()=>{
-        msgEl.textContent = '✓ Đã sao chép link! Mở link này trên Chrome/Safari/Điện thoại để tiếp tục học.';
+        msgEl.textContent = '✓ Đã sao chép link! Mở trên điện thoại 1 LẦN DUY NHẤT để kết nối tự động 2 chiều.';
       }).catch(()=>{
-        prompt('Sao chép liên kết này và mở trên trình duyệt khác:', link);
+        prompt('Sao chép liên kết này và mở trên điện thoại:', link);
       });
     } else {
-      prompt('Sao chép liên kết này và mở trên trình duyệt khác:', link);
+      prompt('Sao chép liên kết này và mở trên điện thoại:', link);
     }
   };
 
@@ -3087,8 +3091,19 @@ async function initializeApp(){
   renderCountdown();
   renderBankSwitcher();
   route();
-  checkReminderTick();
   if(!reminderIntervalStarted){ setInterval(checkReminderTick, 30000); reminderIntervalStarted=true; }
+
+  // Automatic 2-way sync: Pull latest changes when returning to the tab or app
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState === 'visible'){
+      const syncId = safeGetItem('cosmo_cloud_sync_id');
+      if(syncId) cloudPull(syncId, null, true);
+    }
+  });
+  window.addEventListener('focus', ()=>{
+    const syncId = safeGetItem('cosmo_cloud_sync_id');
+    if(syncId) cloudPull(syncId, null, true);
+  });
 
   const accBtn = document.getElementById('accountBtn');
   if(accBtn) accBtn.onclick = ()=> {
