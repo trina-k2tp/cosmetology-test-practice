@@ -949,7 +949,7 @@ async function loginAccount(username, password){
   const accs = getAccounts();
   const acc = accs[key];
   if(!acc){
-    return { success: false, error: `Tài khoản "${uname}" chưa tồn tại trên máy này. Bấm tab Đăng ký để tạo mới!` };
+    return { success: false, notFound: true, username: uname, error: `Tài khoản "${uname}" chưa có trên thiết bị này.` };
   }
 
   const pHash = await hashPassword(pwd);
@@ -1189,6 +1189,67 @@ function showLoginModal(initialTab='login', prefillUser='', onDone=null){
               close();
               if(onDone) onDone(res.user);
             }, 400);
+          } else if(res.notFound){
+            msgEl.innerHTML = `
+              <div style="background:#FFFBEB;border:1px solid #FCD34D;border-radius:8px;padding:12px;margin-top:8px;font-size:12.5px;color:#92400E;line-height:1.45;">
+                <div style="font-weight:700;margin-bottom:4px;">⚠️ Tài khoản "${escapeHtml(uname)}" chưa có trên thiết bị này</div>
+                <div>Vì đây là thiết bị mới, bạn có thể chọn 1 trong 2 cách:</div>
+                <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+                  <button type="button" class="btn btn-sm btn-primary" id="btnQuickRegThis" style="background:#D97706;border-color:#D97706;font-size:11.5px;padding:6px 10px;justify-content:center;">
+                    ✨ 1. Bấm vào đây để tạo "${escapeHtml(uname)}" trên máy này
+                  </button>
+                  <button type="button" class="btn btn-sm btn-ghost" id="btnQuickPasteSync" style="background:#fff;border-color:#FCD34D;font-size:11.5px;padding:6px 10px;justify-content:center;">
+                    📥 2. Dán link hoặc mã đồng bộ từ máy tính sang
+                  </button>
+                </div>
+                <div id="quickSyncPasteArea" style="display:none;margin-top:8px;">
+                  <textarea id="modalQuickSyncInput" placeholder="Dán link đồng bộ hoặc mã dữ liệu từ máy tính vào đây..." style="width:100%;height:55px;padding:6px;font-size:11px;border:1px solid #FCD34D;border-radius:6px;font-family:monospace;"></textarea>
+                  <div style="display:flex;justify-content:flex-end;margin-top:4px;">
+                    <button type="button" class="btn btn-sm btn-primary" id="modalApplyQuickSyncBtn" style="background:#16A34A;border-color:#16A34A;font-size:11.5px;padding:4px 10px;">Áp dụng & Vào học</button>
+                  </div>
+                </div>
+              </div>
+            `;
+            const btnReg = msgEl.querySelector('#btnQuickRegThis');
+            if(btnReg){
+              btnReg.onclick = async ()=>{
+                const r = await registerAccount(uname, pwd);
+                if(r.success){
+                  msgEl.style.color = '#16A34A';
+                  msgEl.textContent = '✓ Đã tạo tài khoản thành công!';
+                  setTimeout(()=>{ close(); if(onDone) onDone(r.user); }, 400);
+                } else {
+                  msgEl.style.color = '#DC2626';
+                  msgEl.textContent = r.error;
+                }
+              };
+            }
+            const btnPaste = msgEl.querySelector('#btnQuickPasteSync');
+            if(btnPaste){
+              btnPaste.onclick = ()=>{
+                const area = msgEl.querySelector('#quickSyncPasteArea');
+                area.style.display = area.style.display === 'none' ? 'block' : 'none';
+              };
+            }
+            const btnApply = msgEl.querySelector('#modalApplyQuickSyncBtn');
+            if(btnApply){
+              btnApply.onclick = ()=>{
+                let raw = (msgEl.querySelector('#modalQuickSyncInput').value||'').trim();
+                if(!raw){ alert('Vui lòng dán link hoặc mã đồng bộ.'); return; }
+                if(raw.includes('import_sync=')){
+                  raw = raw.split('import_sync=')[1].split('&')[0];
+                }
+                try{
+                  const payload = JSON.parse(base64ToUtf8(raw));
+                  const count = importAllData(payload);
+                  msgEl.style.color = '#16A34A';
+                  msgEl.textContent = `✓ Đã nạp thành công tài khoản "${payload.user}" cùng ${count} mục bài học!`;
+                  setTimeout(()=>{ close(); if(onDone) onDone(activeUser); }, 500);
+                }catch(e){
+                  alert('Mã hoặc link không hợp lệ: ' + e.message);
+                }
+              };
+            }
           } else {
             msgEl.textContent = res.error;
           }
